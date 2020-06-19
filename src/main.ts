@@ -1,17 +1,31 @@
 // an interpreter and search system for TIS-100 programs
 
-const MAX_INSTRS = 3;
+import { emulateNode, MAX_INSTRS, RedundancyError } from "./emu";
+import { param, loadParam, ParamContext, ParamMissingError, Param, emptyContext } from "./param";
 
-type ParamContext = {
-  values: Record<string, any>;
-};
-
-const emptyContext: ParamContext = { values: {} };
-
-type Param<T> = { key: string; options: readonly T[]; __type: T };
-
-function param<T>(name: string, options: readonly T[]): Param<T> {
-  return { key: name, options } as Param<T>;
+function serializeProgram(program: ParamContext) {
+  let s = "";
+  for (let pc = 0; pc < MAX_INSTRS; pc++) {
+    s += `${pc}: `;
+    const location = `${pc}:`;
+    try {
+      const op = loadParam(program, paramOp(location));
+      s += op;
+      s += " ";
+      if (op === "ADD" || op === "SUB") {
+        s += loadParam(program, argRead(location));
+      }
+      if (op === "MOV") {
+        s += loadParam(program, argRead(location));
+        s += " ";
+        s += loadParam(program, argWrite(location));
+      }
+    } catch (err) {
+      s += "???";
+    }
+    s += "\n";
+  }
+  return s;
 }
 
 function argRead(name: string) {
@@ -30,11 +44,6 @@ function constantParam(name: string) {
   return param(`const-${name}`, [0, 2] as const);
 }
 
-class ParamMissingError extends Error {
-  constructor(public readonly context: ParamContext, public readonly param: Param<any>) {
-    super(`missing param assignment for '${param.key}'`);
-  }
-}
 class StateViolationError extends Error {
   constructor() {
     super("node entered illegal state; program is invalid");
@@ -51,13 +60,6 @@ class DoneError extends Error {
   }
 }
 
-function loadParam<T>(context: ParamContext, param: Param<T>): T {
-  if (param.key in context.values) {
-    return context.values[param.key];
-  }
-  throw new ParamMissingError(context, param);
-}
-
 function assignParam<T>(context: ParamContext, param: Param<T>, value: T): ParamContext {
   if (param.key in context.values) {
     throw new Error(`param key '${param.key}' was already assigned`);
@@ -68,123 +70,6 @@ function assignParam<T>(context: ParamContext, param: Param<T>, value: T): Param
 }
 function bifurcateParam<T>(context: ParamContext, param: Param<T>): ParamContext[] {
   return param.options.map((option) => assignParam(context, param, option));
-}
-
-type Port = "LEFT" | "RIGHT" | "UP" | "DOWN";
-
-type Interaction<Value> = {
-  recv: (port: Port) => Value;
-  send: (port: Port, value: Value) => void;
-};
-
-function emulateNode<Value>(
-  program: ParamContext,
-  report: (state: string) => void,
-  interaction: Interaction<Value>,
-  arithmetic: {
-    zero: Value;
-    add: (a: Value, b: Value) => Value;
-    neg: (a: Value) => Value;
-    symbol: (name: string) => Value;
-  },
-) {
-  let pc = 0;
-  let acc = arithmetic.zero;
-  let bak = arithmetic.zero;
-
-  function recv(src: "sym" | "ACC" | Port, place: string): Value {
-    if (src === "ACC") {
-      return acc;
-    }
-    if (src === "sym") {
-      return arithmetic.symbol(place);
-    }
-    return interaction.recv(src);
-  }
-
-  function send(dst: "NIL" | "ACC" | Port, value: Value): void {
-    if (dst === "NIL") {
-      return;
-    }
-    if (dst === "ACC") {
-      acc = value;
-      return;
-    }
-    interaction.send(dst, value);
-  }
-
-  while (true) {
-    report(JSON.stringify([pc, acc, bak]));
-
-    const instructionLocation = `node00:${pc}`;
-
-    const op = loadParam(program, paramOp(instructionLocation));
-    ({
-      ADD: () => {
-        const from = recv(loadParam(program, argRead(instructionLocation)), instructionLocation);
-        acc = arithmetic.add(acc, from);
-      },
-      SUB: () => {
-        const from = recv(loadParam(program, argRead(instructionLocation)), instructionLocation);
-        acc = arithmetic.add(acc, arithmetic.neg(from));
-      },
-      MOV: () => {
-        const from = recv(loadParam(program, argRead(instructionLocation)), instructionLocation);
-        send(loadParam(program, argWrite(instructionLocation)), from);
-
-        // sanity check for pointless programs:
-        if (loadParam(program, argWrite(instructionLocation)) === "NIL") {
-          const read = loadParam(program, argRead(instructionLocation));
-          if (typeof read === "number" || read === "ACC") {
-            // Pointless operation; use NOP instead.
-            throw new StateViolationError();
-          }
-        }
-      },
-      NEG: () => {
-        acc = arithmetic.neg(acc);
-      },
-      SWP: () => {
-        [acc, bak] = [bak, acc];
-      },
-      SAV: () => {
-        bak = acc;
-      },
-      NOP: () => {
-        // nothing
-      },
-    }[op]());
-
-    pc++;
-    pc %= MAX_INSTRS;
-  }
-}
-
-// attempt to search for programs!
-
-function nice(program: ParamContext) {
-  let s = "";
-  for (let pc = 0; pc < MAX_INSTRS; pc++) {
-    s += `${pc}: `;
-    const instructionLocation = `node00:${pc}`;
-    try {
-      const op = loadParam(program, paramOp(instructionLocation));
-      s += op;
-      s += " ";
-      if (op === "ADD" || op === "SUB") {
-        s += loadParam(program, argRead(instructionLocation));
-      }
-      if (op === "MOV") {
-        s += loadParam(program, argRead(instructionLocation));
-        s += " ";
-        s += loadParam(program, argWrite(instructionLocation));
-      }
-    } catch (err) {
-      s += "???";
-    }
-    s += "\n";
-  }
-  return s;
 }
 
 function solve(scenarios: { input: number[]; output: number[] }[]) {
@@ -207,7 +92,11 @@ function solve(scenarios: { input: number[]; output: number[] }[]) {
         let outputCounter = 0;
         const encounters = new Set<string>();
         emulateNode(
-          context,
+          {
+            op: (pc: number) => loadParam(context, paramOp(`${pc}:`)),
+            src: (pc: number) => loadParam(context, argRead(`${pc}:`)),
+            dst: (pc: number) => loadParam(context, argWrite(`${pc}:`)),
+          },
           (report) => {
             const fullReport = `${report};${inputCounter};${outputCounter}`;
             if (encounters.has(fullReport)) {
@@ -279,7 +168,7 @@ function solve(scenarios: { input: number[]; output: number[] }[]) {
           },
         );
       } catch (err) {
-        if (err instanceof StateViolationError) {
+        if (err instanceof StateViolationError || err instanceof RedundancyError) {
           // no need to consider branches
           violation = true;
           break;
@@ -302,7 +191,7 @@ function solve(scenarios: { input: number[]; output: number[] }[]) {
     }
 
     if (doneCount === scenarios.length) {
-      console.info(nice(context));
+      console.info(serializeProgram(context));
       console.info("success!");
       console.info("checked", workCount);
       console.info("search stack", search.length);
