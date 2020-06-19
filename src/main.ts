@@ -15,7 +15,7 @@ function param<T>(name: string, options: readonly T[]): Param<T> {
 }
 
 function argRead(name: string) {
-  return param(`read-arg-${name}`, ["UP", "LEFT", "RIGHT", "DOWN", "ACC"] as const);
+  return param(`read-arg-${name}`, ["UP", "LEFT", "RIGHT", "DOWN", "ACC", "sym"] as const);
 }
 
 function argWrite(name: string) {
@@ -24,6 +24,10 @@ function argWrite(name: string) {
 
 function paramOp(name: string) {
   return param(`op-${name}`, ["ADD", "SUB", "MOV", "NEG", "SWP", "SAV", "NOP"] as const);
+}
+
+function constantParam(name: string) {
+  return param(`const-${name}`, [0, 2] as const);
 }
 
 class ParamMissingError extends Error {
@@ -68,27 +72,37 @@ function bifurcateParam<T>(context: ParamContext, param: Param<T>): ParamContext
 
 type Port = "LEFT" | "RIGHT" | "UP" | "DOWN";
 
-type Interaction = {
-  recv: (port: Port) => number;
-  send: (port: Port, value: number) => void;
+type Interaction<Value> = {
+  recv: (port: Port) => Value;
+  send: (port: Port, value: Value) => void;
 };
 
-function emulateNode(program: ParamContext, report: (state: string) => void, interaction: Interaction) {
+function emulateNode<Value>(
+  program: ParamContext,
+  report: (state: string) => void,
+  interaction: Interaction<Value>,
+  arithmetic: {
+    zero: Value;
+    add: (a: Value, b: Value) => Value;
+    neg: (a: Value) => Value;
+    symbol: (name: string) => Value;
+  },
+) {
   let pc = 0;
-  let acc = 0;
-  let bak = 0;
+  let acc = arithmetic.zero;
+  let bak = arithmetic.zero;
 
-  function recv(src: number | "ACC" | Port): number {
-    if (typeof src === "number") {
-      return src;
-    }
+  function recv(src: "sym" | "ACC" | Port, place: string): Value {
     if (src === "ACC") {
       return acc;
+    }
+    if (src === "sym") {
+      return arithmetic.symbol(place);
     }
     return interaction.recv(src);
   }
 
-  function send(dst: "NIL" | "ACC" | Port, value: number): void {
+  function send(dst: "NIL" | "ACC" | Port, value: Value): void {
     if (dst === "NIL") {
       return;
     }
@@ -107,21 +121,15 @@ function emulateNode(program: ParamContext, report: (state: string) => void, int
     const op = loadParam(program, paramOp(instructionLocation));
     ({
       ADD: () => {
-        const from = recv(loadParam(program, argRead(instructionLocation)));
-        acc += from;
-        if (acc > 999 || acc < -999) {
-          throw new StateViolationError();
-        }
+        const from = recv(loadParam(program, argRead(instructionLocation)), instructionLocation);
+        acc = arithmetic.add(acc, from);
       },
       SUB: () => {
-        const from = recv(loadParam(program, argRead(instructionLocation)));
-        acc -= from;
-        if (acc > 999 || acc < -999) {
-          throw new StateViolationError();
-        }
+        const from = recv(loadParam(program, argRead(instructionLocation)), instructionLocation);
+        acc = arithmetic.add(acc, arithmetic.neg(from));
       },
       MOV: () => {
-        const from = recv(loadParam(program, argRead(instructionLocation)));
+        const from = recv(loadParam(program, argRead(instructionLocation)), instructionLocation);
         send(loadParam(program, argWrite(instructionLocation)), from);
 
         // sanity check for pointless programs:
@@ -134,7 +142,7 @@ function emulateNode(program: ParamContext, report: (state: string) => void, int
         }
       },
       NEG: () => {
-        acc = -acc;
+        acc = arithmetic.neg(acc);
       },
       SWP: () => {
         [acc, bak] = [bak, acc];
@@ -251,6 +259,22 @@ function solve(scenarios: { input: number[]; output: number[] }[]) {
               if (outputCounter >= scenario.output.length) {
                 throw new DoneError();
               }
+            },
+          },
+          {
+            add: (a: number, b: number): number => {
+              const v = a + b;
+              if (v > 999 || v < -999) {
+                throw new StateViolationError();
+              }
+              return v;
+            },
+            neg: (a: number): number => {
+              return -a;
+            },
+            zero: 0,
+            symbol: (place: string) => {
+              return loadParam(context, constantParam(place));
             },
           },
         );

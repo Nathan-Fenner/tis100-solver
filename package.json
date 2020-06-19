@@ -4,7 +4,7 @@
   "main": "index.js",
   "license": "MIT",
   "scripts": {
-    "run": "ts-node src/main.ts"
+    "emu": "ts-node src/main.ts"
   },
   "dependencies": {
     "ts-node": "^8.10.2",
